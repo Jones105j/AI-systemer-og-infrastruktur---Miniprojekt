@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from torchvision.models import resnet18, ResNet18_Weights
 
-from db import APIRequest, User, get_session
+from host.db import APIRequest, User, get_session
 
 # Brug grafikkortet ("cuda" KUN Nvidia), ("mps" kun for Mac-users grafikkort), hvis der er et, ellers processoren ("cpu")
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
