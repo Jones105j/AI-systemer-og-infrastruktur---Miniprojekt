@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import time
 from contextlib import asynccontextmanager
 from io import BytesIO
@@ -7,13 +8,14 @@ from io import BytesIO
 import torch
 from PIL import Image
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from torchvision.models import resnet18, ResNet18_Weights
 
-from db import APIRequest, User, get_session
+from db import APIRequest, User, engine, get_session
 
 # Brug grafikkortet ("cuda" KUN Nvidia), ("mps" kun for Mac-users grafikkort), hvis der er et, ellers processoren ("cpu")
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
@@ -79,6 +81,39 @@ async def chat(
             status_code=status_code,
         ))
         db.commit()
+
+
+# Hjemmesiden: "Streaming Responses with SSE" - svaret sendes del for del
+@app.post("/v1/chat/stream")
+async def chat_stream(
+    req: ChatRequest,
+    user: User = Depends(get_current_user),
+):
+    user_id = user.id  # gem id nu, generatoren kører efter dependencies er lukket
+
+    async def token_stream():
+        start = time.perf_counter()
+        status_code = 200
+        try:
+            for word in f"Du skrev: {req.message}".split():
+                yield f"data: {json.dumps({'delta': word + ' '})}\n\n"
+                await asyncio.sleep(0.3)  # simulerer at modellen genererer tokens
+            yield "data: [DONE]\n\n"
+        except Exception:
+            status_code = 500
+            raise
+        finally:
+            # Egen session, da Depends(get_session) kan være lukket når streamen kører
+            with Session(engine) as db:
+                db.add(APIRequest(
+                    user_id=user_id,
+                    endpoint="/v1/chat/stream",
+                    response_time_ms=(time.perf_counter() - start) * 1000,
+                    status_code=status_code,
+                ))
+                db.commit()
+
+    return StreamingResponse(token_stream(), media_type="text/event-stream")
 
 
 # Hjemmesiden: "Logging Each Request"
