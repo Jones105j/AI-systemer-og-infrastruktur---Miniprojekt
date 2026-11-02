@@ -39,7 +39,8 @@ async def lifespan(app: FastAPI):
     ml["categories"] = weights.meta["categories"]
 
     ml["tokenizer"] = AutoTokenizer.from_pretrained(LLM_NAME)
-    llm = AutoModelForCausalLM.from_pretrained(LLM_NAME).to(device)
+    # float32: CPU'en i Docker understøtter ikke bfloat16, som ellers gør generering meget langsom
+    llm = AutoModelForCausalLM.from_pretrained(LLM_NAME, dtype=torch.float32).to(device)
     llm.eval()
     ml["llm"] = llm
     print("Modeller indlæst!")
