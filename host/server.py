@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from torchvision.models import resnet18, ResNet18_Weights
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
+from datetime import datetime, timedelta, timezone
 
 from db import APIRequest, User, engine, get_session
 
@@ -78,6 +79,7 @@ async def chat(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    check_rate_limit(user, db)
     start = time.perf_counter()
     status_code = 200
     try:
@@ -101,7 +103,9 @@ async def chat(
 async def chat_stream(
     req: ChatRequest,
     user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
 ):
+    check_rate_limit(user, db)
     user_id = user.id  # gem id nu, generatoren kører efter dependencies er lukket
 
     # Almindelig (ikke-async) generator: FastAPI kører den i en tråd,
@@ -141,6 +145,7 @@ async def classify(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    check_rate_limit(user, db)
     start = time.perf_counter()
     status_code = 200
     try:
@@ -196,3 +201,19 @@ def usage(user: User = Depends(get_current_user), db: Session = Depends(get_sess
         select(func.count()).select_from(APIRequest).where(APIRequest.user_id == user.id)
     )
     return {"user_id": user.id, "total_requests": total}
+
+
+RATE_LIMIT = 5
+WINDOW_SECONDS = 60
+
+def check_rate_limit(user: User, db: Session):
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=WINDOW_SECONDS)
+    recent = db.scalar(
+        select(func.count()).select_from(APIRequest)
+        .where(APIRequest.user_id == user.id, APIRequest.timestamp >= cutoff)
+    )
+    if recent >= RATE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: {RATE_LIMIT} requests per {WINDOW_SECONDS} seconds",
+        )
