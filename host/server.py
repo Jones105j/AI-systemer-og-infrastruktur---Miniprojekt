@@ -4,6 +4,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from io import BytesIO
+from threading import Thread
 
 import torch
 from PIL import Image
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from torchvision.models import resnet18, ResNet18_Weights
+from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 from db import APIRequest, User, engine, get_session
 
@@ -23,6 +25,10 @@ print(f"Bruger device: {device}")
 
 ml = {}  # holds the model and its peripherals
 
+# Lille sprogmodel fra HuggingFace, som serveren selv kører (ingen ekstern AI-udbyder)
+LLM_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MAX_NEW_TOKENS = 256
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     weights = ResNet18_Weights.DEFAULT
@@ -31,7 +37,12 @@ async def lifespan(app: FastAPI):
     ml["model"] = model
     ml["preprocess"] = weights.transforms()
     ml["categories"] = weights.meta["categories"]
-    print("Model indlæst!")
+
+    ml["tokenizer"] = AutoTokenizer.from_pretrained(LLM_NAME)
+    llm = AutoModelForCausalLM.from_pretrained(LLM_NAME).to(device)
+    llm.eval()
+    ml["llm"] = llm
+    print("Modeller indlæst!")
     yield
     ml.clear()  # release on shutdown
 
@@ -69,7 +80,8 @@ async def chat(
     start = time.perf_counter()
     status_code = 200
     try:
-        return {"reply": f"Du skrev: {req.message}"}
+        reply = await asyncio.to_thread(run_llm, req.message)
+        return {"model": LLM_NAME, "reply": reply}
     except Exception as e:
         status_code = 500
         raise HTTPException(status_code=500, detail=str(e))
@@ -91,13 +103,18 @@ async def chat_stream(
 ):
     user_id = user.id  # gem id nu, generatoren kører efter dependencies er lukket
 
-    async def token_stream():
+    # Almindelig (ikke-async) generator: FastAPI kører den i en tråd,
+    # så ventetiden på modellen blokerer ikke resten af serveren
+    def token_stream():
         start = time.perf_counter()
         status_code = 200
         try:
-            for word in f"Du skrev: {req.message}".split():
-                yield f"data: {json.dumps({'delta': word + ' '})}\n\n"
-                await asyncio.sleep(0.3)  # simulerer at modellen genererer tokens
+            # Modellen genererer i sin egen tråd og lægger tekst i streameren, mens vi læser
+            streamer = TextIteratorStreamer(ml["tokenizer"], skip_prompt=True, skip_special_tokens=True)
+            Thread(target=run_llm, args=(req.message, streamer)).start()
+            for text in streamer:
+                if text:
+                    yield f"data: {json.dumps({'delta': text})}\n\n"
             yield "data: [DONE]\n\n"
         except Exception:
             status_code = 500
@@ -144,6 +161,21 @@ async def classify(
             status_code=status_code,
         ))
         db.commit()
+
+def run_llm(message: str, streamer: TextIteratorStreamer | None = None) -> str:
+    """Kører sprogmodellen på brugerens besked. Med en streamer sendes teksten ud løbende."""
+    tokenizer = ml["tokenizer"]
+    messages = [
+        {"role": "system", "content": "Du er en hjælpsom assistent. Svar kort og på samme sprog som brugeren."},
+        {"role": "user", "content": message},
+    ]
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    with torch.no_grad():
+        output = ml["llm"].generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, streamer=streamer)
+    new_tokens = output[0][inputs["input_ids"].shape[1]:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True)
+
 
 def run_inference(image: Image.Image):
     batch = ml["preprocess"](image).unsqueeze(0).to(device)

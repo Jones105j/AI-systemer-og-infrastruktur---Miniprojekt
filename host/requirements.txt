@@ -6,3 +6,4 @@ torch
 torchvision
 pillow
 sqlalchemy
+transformers

@@ -12,6 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # NYT: Hent ResNet-18-vægtene nu, så de bliver gemt i imaget
 RUN python -c "from torchvision.models import resnet18, ResNet18_Weights; resnet18(weights=ResNet18_Weights.DEFAULT)"
 
+# NYT: Hent også sprogmodellen (LLM) fra HuggingFace, så den ikke skal downloades ved hver opstart
+RUN python -c "from transformers import AutoModelForCausalLM, AutoTokenizer; AutoTokenizer.from_pretrained('Qwen/Qwen2.5-0.5B-Instruct'); AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-0.5B-Instruct')"
+
 # Kopier selve server-koden
 COPY server.py db.py ./
 
